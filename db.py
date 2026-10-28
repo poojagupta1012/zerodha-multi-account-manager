@@ -60,7 +60,29 @@ CREATE TABLE IF NOT EXISTS copy_log (
     created_at       TEXT NOT NULL,
     UNIQUE (master_order_id, client_id)
 );
+
+-- Small key/value store for runtime settings the admin UI can change without
+-- a restart (safety limits) and for the ticker's heartbeat.
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
+
+# Defaults for settings editable from the UI. Values are stored as text.
+#   copy_enabled           - global kill switch; "false" pauses all copying.
+#   max_quantity_per_trade - child orders above this quantity are blocked
+#                            (0 = no limit). Guards against a fat-fingered
+#                            master order or a mistyped multiplier.
+SETTING_DEFAULTS = {
+    "copy_enabled": "true",
+    "max_quantity_per_trade": "0",
+}
+
+# The ticker writes a heartbeat this often; the UI treats it as stopped when
+# the last heartbeat is older than TICKER_STALE_AFTER.
+TICKER_HEARTBEAT_SECONDS = 15
+TICKER_STALE_AFTER = timedelta(seconds=TICKER_HEARTBEAT_SECONDS * 4)
 
 
 @dataclass(frozen=True)
@@ -285,3 +307,101 @@ def recent_copies(limit: int = 50) -> list[dict]:
             "SELECT * FROM copy_log ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def copy_stats_today() -> dict:
+    """Counts for the dashboard, from today's (IST) copy_log rows."""
+    # created_at is an IST ISO timestamp, so a date prefix match is enough.
+    today = now_ist().date().isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT master_order_id)                AS master_trades,
+                   COALESCE(SUM(status = 'PLACED'), 0)            AS placed,
+                   COALESCE(SUM(status = 'FAILED'), 0)            AS failed,
+                   COALESCE(SUM(status = 'SKIPPED'), 0)           AS skipped,
+                   COALESCE(SUM(status = 'PENDING'), 0)           AS pending
+            FROM copy_log WHERE created_at LIKE ? || '%'
+            """,
+            (today,),
+        ).fetchone()
+    return dict(row)
+
+
+# --- settings ------------------------------------------------------------------------
+
+def get_setting(key: str) -> Optional[str]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else SETTING_DEFAULTS.get(key)
+
+
+def set_setting(key: str, value: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def get_safety_settings() -> dict:
+    return {
+        "copy_enabled": get_setting("copy_enabled") == "true",
+        "max_quantity_per_trade": int(get_setting("max_quantity_per_trade") or 0),
+    }
+
+
+def save_safety_settings(copy_enabled: bool, max_quantity_per_trade: int) -> None:
+    if max_quantity_per_trade < 0:
+        raise ValueError("max_quantity_per_trade must be >= 0")
+    set_setting("copy_enabled", "true" if copy_enabled else "false")
+    set_setting("max_quantity_per_trade", str(int(max_quantity_per_trade)))
+
+
+def set_master_credentials(api_key: Optional[str], api_secret: Optional[str]) -> None:
+    """
+    Store the master's own Kite app key/secret. A blank api_key reverts to
+    KITE_API_KEY from .env; a blank secret keeps the stored one.
+    """
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE accounts SET api_key = ?, api_secret = COALESCE(?, api_secret) "
+            "WHERE role = 'master'",
+            ((api_key or "").strip() or None,
+             _encrypt(api_secret.strip()) if api_secret and api_secret.strip() else None),
+        )
+        if cur.rowcount == 0:
+            raise KeyError("No master account registered")
+
+
+def master_credentials_overridden() -> dict:
+    """Whether the master stores its own key/secret or uses the .env defaults.
+    Never returns the secret itself."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT api_key, api_secret FROM accounts WHERE role = 'master'"
+        ).fetchone()
+    return {
+        "api_key": bool(row and row["api_key"]),
+        "api_secret": bool(row and row["api_secret"]),
+    }
+
+
+def record_ticker_heartbeat(connected: bool) -> None:
+    set_setting("ticker_connected", "true" if connected else "false")
+    set_setting("ticker_heartbeat", now_ist().isoformat())
+
+
+def ticker_status() -> dict:
+    """'running' (fresh heartbeat, socket connected), 'disconnected' (process
+    alive but socket down, e.g. reconnecting), or 'stopped'."""
+    beat = get_setting("ticker_heartbeat")
+    last = datetime.fromisoformat(beat) if beat else None
+    if last is None or now_ist() - last > TICKER_STALE_AFTER:
+        state = "stopped"
+    elif get_setting("ticker_connected") == "true":
+        state = "running"
+    else:
+        state = "disconnected"
+    return {"state": state, "last_heartbeat": last.isoformat() if last else None}

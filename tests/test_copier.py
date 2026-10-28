@@ -140,6 +140,21 @@ def test_stale_token_child_is_failed_without_api_call(engine, monkeypatch):
     assert "tok-C1" not in {tok for tok, _, _ in FakeKite.calls}
 
 
+def test_max_quantity_blocks_oversized_child_orders(engine):
+    db.save_safety_settings(copy_enabled=True, max_quantity_per_trade=10)
+    results = {r["client_id"]: r for r in engine.copy(MasterOrder.from_order_update(order_update()))}
+    assert results["C1"]["status"] == "PLACED"      # 10 <= 10
+    assert results["C3"]["status"] == "SKIPPED" and "exceeds" in results["C3"]["error"]
+    assert "tok-C3" not in {tok for tok, _, _ in FakeKite.calls}
+
+
+def test_kill_switch_skips_every_child(engine):
+    db.save_safety_settings(copy_enabled=False, max_quantity_per_trade=0)
+    results = engine.copy(MasterOrder.from_order_update(order_update()))
+    assert {r["status"] for r in results} == {"SKIPPED"}
+    assert FakeKite.calls == []
+
+
 # --- token expiry -----------------------------------------------------------------------
 
 def test_token_freshness_around_6am():

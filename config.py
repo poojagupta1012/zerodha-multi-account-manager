@@ -62,6 +62,13 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 # Leave empty only when the server is bound to localhost.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
+# Admin UI (frontend/). After a Kite login the callback sends the browser back
+# here; set it to an empty string to show a plain confirmation page instead.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+# Browser origins allowed to call the JSON API (comma-separated).
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", FRONTEND_URL).split(",") if o.strip()]
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 

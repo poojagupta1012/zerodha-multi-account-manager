@@ -23,6 +23,7 @@ Run after the master has logged in for the day:  python ticker.py
 
 import logging
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from kiteconnect import KiteTicker
@@ -81,6 +82,10 @@ class MasterListener:
         self.dispatcher = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dispatch")
         # Fast in-memory de-dup; copy_log's UNIQUE constraint is the durable one.
         self.seen_order_ids: set[str] = set()
+        # Heartbeat thread: lets the admin UI tell "running", "reconnecting"
+        # and "stopped" apart, since the ticker is a separate process.
+        self._stop_heartbeat = threading.Event()
+        self._heartbeat = threading.Thread(target=self._heartbeat_loop, name="heartbeat", daemon=True)
 
         self.kws = KiteTicker(master.api_key, master.access_token)
         self.kws.on_connect = self.on_connect
@@ -96,6 +101,7 @@ class MasterListener:
         # No subscribe() call needed: order updates flow without one.
         log.info("Connected to Kite WebSocket as master %s; listening for orders",
                  self.master.client_id)
+        self._beat(True)
 
     def on_order_update(self, ws, data: dict) -> None:
         order_id = str(data.get("order_id", ""))
@@ -124,6 +130,7 @@ class MasterListener:
     def on_close(self, ws, code, reason) -> None:
         # KiteTicker reconnects automatically after an unexpected close.
         log.warning("WebSocket closed: %s %s", code, reason)
+        self._beat(False)
 
     def on_error(self, ws, code, reason) -> None:
         # A 403 here almost always means the master's access token expired
@@ -140,6 +147,16 @@ class MasterListener:
 
     # --- internals -----------------------------------------------------------------
 
+    def _beat(self, connected: bool) -> None:
+        try:
+            db.record_ticker_heartbeat(connected)
+        except Exception:
+            log.exception("Could not write ticker heartbeat")
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop_heartbeat.wait(db.TICKER_HEARTBEAT_SECONDS):
+            self._beat(self.kws.is_connected())
+
     def _safe_copy(self, order: MasterOrder) -> None:
         try:
             self.engine.copy(order)
@@ -150,7 +167,12 @@ class MasterListener:
     def run(self) -> None:
         # threaded=False runs the Twisted reactor on this thread and blocks
         # until stop() or Ctrl+C.
-        self.kws.connect(threaded=False)
+        self._heartbeat.start()
+        try:
+            self.kws.connect(threaded=False)
+        finally:
+            self._stop_heartbeat.set()
+            self._beat(False)
 
     def stop(self) -> None:
         try:

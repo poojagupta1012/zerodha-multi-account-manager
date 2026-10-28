@@ -208,6 +208,11 @@ class CopyEngine:
             order.tradingsymbol, order.order_type, order.product, len(children),
         )
 
+        # Read once per master order, so changes made in the admin UI apply to
+        # the next trade without restarting the ticker.
+        safety = db.get_safety_settings()
+        max_qty = safety["max_quantity_per_trade"]
+
         results: list[dict] = []
         futures: dict[Future, db.Account] = {}
         for child in children:
@@ -216,6 +221,18 @@ class CopyEngine:
                                  order.transaction_type, qty):
                 log.info("[%s] already handled master order %s; skipping duplicate",
                          child.client_id, order.order_id)
+                continue
+            if not safety["copy_enabled"]:
+                reason = "copy trading is paused in settings"
+                log.warning("[%s] SKIPPED: %s", child.client_id, reason)
+                results.append(self._record(order, child, "SKIPPED", error=reason))
+                continue
+            if max_qty and qty > max_qty:
+                # Block rather than clamp: a partial copy would leave the child
+                # with a position size nobody asked for.
+                reason = f"quantity {qty} exceeds max quantity per trade ({max_qty})"
+                log.warning("[%s] SKIPPED: %s", child.client_id, reason)
+                results.append(self._record(order, child, "SKIPPED", error=reason))
                 continue
             if qty < 1:
                 reason = f"quantity {order.quantity} x {child.multiplier} < 1 (lot size {lot_size})"

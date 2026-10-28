@@ -16,11 +16,12 @@ Mirrors every completed order in a **master** Zerodha account into any number of
 | File | Role |
 |---|---|
 | `config.py` | Loads `.env` settings |
-| `db.py` | SQLite: `accounts` (encrypted tokens, role, multiplier) and `copy_log` (idempotency + audit) |
-| `main.py` | FastAPI: `/login`, `/api/callback`, plus `/accounts`, `/copies`, `/health` |
+| `db.py` | SQLite: `accounts` (encrypted tokens, role, multiplier), `copy_log` (idempotency + audit), `settings` (safety limits, ticker heartbeat) |
+| `main.py` | FastAPI: `/login`, `/api/callback`, and the `/api/*` JSON API used by the admin UI |
 | `ticker.py` | KiteTicker listener for the master's order updates and filtering |
 | `copier.py` | Quantity scaling and parallel child order placement |
 | `manage.py` | CLI to add, list, and edit accounts |
+| `frontend/` | Admin UI (Next.js): dashboard, child accounts, settings. See [Admin UI](#admin-ui) |
 
 ## Setup
 
@@ -43,14 +44,44 @@ python manage.py add EF9012 --role child --multiplier 2
 python manage.py list
 ```
 
+## Admin UI
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local      # NEXT_PUBLIC_API_URL=http://localhost:8000
+npm run dev                     # http://localhost:3000
+```
+
+Requires Node 20.19+ (shadcn and ESLint warn on older 20.x). Built with Next.js 16
+(App Router), React 19, Tailwind CSS v4, shadcn/ui on Base UI, React Hook Form + Zod,
+TanStack Query and TanStack Table v9.
+
+- **Dashboard:** master token status with a *Login to Kite* button, ticker status,
+  today's counts, and a live feed (refreshes every 5s) of each master trade with
+  the result in every child account. Hover a child badge to see its order ID or error.
+- **Child Accounts:** add (then straight into that client's Kite login), edit the
+  multiplier, pause/resume, log in again, delete.
+- **Settings:** register the master and its own Kite app key/secret (the secret is
+  write-only), the copy-trading kill switch, and **max quantity per trade**. A child
+  order above the limit is blocked and logged as `SKIPPED`, not reduced.
+  Limits apply from the next trade without restarting the ticker.
+
+After a Kite login the backend redirects to `FRONTEND_URL` (default
+`http://localhost:3000`). Set `FRONTEND_URL=` (empty) to get the plain confirmation
+page instead. If `ADMIN_TOKEN` is set, enter it under *Settings → Backend access*;
+it is kept in that browser's localStorage.
+
 ## Daily routine (tokens expire at 6 AM IST)
 
-1. `uvicorn main:app --host 127.0.0.1 --port 8000`
-2. Each account holder opens `http://127.0.0.1:8000/login?client_id=<ID>` and logs in.
-   (Add `&admin_token=...` if `ADMIN_TOKEN` is set.)
-3. Check `python manage.py list`: every account should show `fresh`.
+1. `uvicorn main:app --host 127.0.0.1 --port 8000` (and `npm run dev` in `frontend/`).
+2. Each account holder logs in, via *Login to Kite* in the UI or by opening
+   `http://127.0.0.1:8000/login?client_id=<ID>` (add `&admin_token=...` if
+   `ADMIN_TOKEN` is set).
+3. Check that every account shows *Token active* (or `python manage.py list`).
 4. `python ticker.py`. Start it **after** the master logs in, and restart it each day.
-5. Watch results with `python manage.py log` or `GET /copies`.
+   The dashboard shows *Ticker running* while its heartbeat is fresh.
+5. Watch results on the dashboard, with `python manage.py log`, or `GET /copies`.
 
 Try `DRY_RUN=true` first to see exactly what would be placed without sending orders.
 
