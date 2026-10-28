@@ -38,6 +38,11 @@ LOT_SIZED_EXCHANGES = {"NFO", "BFO"}
 # need extra legs/params, so they are copied as plain "regular" orders.
 COPYABLE_VARIETIES = {KiteConnect.VARIETY_REGULAR, KiteConnect.VARIETY_AMO}
 
+# Kite rejects API market orders without market protection (a cap on how far
+# from the last price a market order may fill); -1 applies Kite's automatic
+# protection per exchange guidelines.
+MARKET_PROTECTION_AUTO = -1
+
 
 @dataclass(frozen=True)
 class MasterOrder:
@@ -134,6 +139,8 @@ def build_order_params(order: MasterOrder, quantity: int) -> dict:
     if order_type == KiteConnect.ORDER_TYPE_LIMIT:
         # Fall back to the average fill price if the limit price is missing.
         params["price"] = order.price or order.average_price
+    else:
+        params["market_protection"] = MARKET_PROTECTION_AUTO
     return params
 
 

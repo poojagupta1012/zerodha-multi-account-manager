@@ -63,10 +63,12 @@ def test_should_copy_rejects(overrides):
 
 def test_slm_copied_as_market_and_sl_as_limit():
     slm = MasterOrder.from_order_update(order_update(order_type="SL-M", trigger_price=1490))
-    assert build_order_params(slm, 5)["order_type"] == "MARKET"
+    params = build_order_params(slm, 5)
+    assert params["order_type"] == "MARKET" and params["market_protection"] == -1
     sl = MasterOrder.from_order_update(order_update(order_type="SL", price=1495, trigger_price=1490))
     params = build_order_params(sl, 5)
     assert params["order_type"] == "LIMIT" and params["price"] == 1495
+    assert "market_protection" not in params
 
 
 def test_cover_order_copied_as_regular():

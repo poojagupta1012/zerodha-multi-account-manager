@@ -5,7 +5,7 @@ import { useState } from "react"
 import { toast } from "sonner"
 
 import { DeleteAccountDialog } from "@/components/accounts/delete-account-dialog"
-import { EditMultiplierDialog } from "@/components/accounts/edit-multiplier-dialog"
+import { EditAccountDialog } from "@/components/accounts/edit-account-dialog"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -22,6 +22,8 @@ export function AccountRowActions({ account }: { account: Account }) {
   // Dialogs live outside the menu so they stay mounted after it closes.
   const [dialog, setDialog] = useState<"edit" | "delete" | null>(null)
   const update = useUpdateAccount()
+  // Kite rejects a child logging in through anyone else's app.
+  const canLogIn = account.role === "master" || account.has_own_app
 
   function toggleActive() {
     const is_active = !account.is_active
@@ -39,14 +41,17 @@ export function AccountRowActions({ account }: { account: Account }) {
         >
           <MoreHorizontalIcon />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
-          <DropdownMenuItem onClick={() => window.location.assign(kiteLoginUrl(account.client_id))}>
+        <DropdownMenuContent align="end" className="w-52">
+          <DropdownMenuItem
+            onClick={() => window.location.assign(kiteLoginUrl(account.client_id))}
+            disabled={!canLogIn}
+          >
             <LogInIcon />
-            Login to Kite
+            {canLogIn ? "Login to Kite" : "Add API key to log in"}
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => setDialog("edit")}>
             <PencilIcon />
-            Edit multiplier
+            Edit account
           </DropdownMenuItem>
           <DropdownMenuItem onClick={toggleActive} disabled={update.isPending}>
             {account.is_active ? <PauseIcon /> : <PlayIcon />}
@@ -60,7 +65,7 @@ export function AccountRowActions({ account }: { account: Account }) {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <EditMultiplierDialog
+      <EditAccountDialog
         account={account}
         open={dialog === "edit"}
         onOpenChange={(open) => setDialog(open ? "edit" : null)}

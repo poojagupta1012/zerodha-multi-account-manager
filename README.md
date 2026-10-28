@@ -32,15 +32,24 @@ cp .env.example .env
 python manage.py gen-key        # paste into TOKEN_ENCRYPTION_KEY in .env
 ```
 
-In your Kite Connect app on developers.kite.trade, set the **Redirect URL** to
-`http://127.0.0.1:8000/api/callback`.
+Kite only lets the client ID an app is registered to log in through it, so
+**every account needs its own Kite Connect app** on developers.kite.trade:
 
-Register accounts:
+- The master's app goes in `KITE_API_KEY` / `KITE_API_SECRET` in `.env`. It must be
+  on the paid Connect plan, since the ticker uses Kite's WebSocket.
+- Each child gets its own app, which can be created from the master's developer
+  account: set the app's **Zerodha Client ID** to the child's ID. The free
+  Personal plan is enough, since children only place orders. Its key and secret
+  are entered when adding the child in the UI, and the secret is stored encrypted.
+
+On every app, set the **Redirect URL** to `http://127.0.0.1:8000/api/callback`
+and register your static public IP.
+
+Register accounts from the UI, or with:
 
 ```bash
 python manage.py add AB1234 --role master
-python manage.py add CD5678 --role child --multiplier 0.5
-python manage.py add EF9012 --role child --multiplier 2
+python manage.py add CD5678 --role child --multiplier 0.5 --api-key K --api-secret S
 python manage.py list
 ```
 
@@ -60,8 +69,14 @@ TanStack Query and TanStack Table v9.
 - **Dashboard:** master token status with a *Login to Kite* button, ticker status,
   today's counts, and a live feed (refreshes every 5s) of each master trade with
   the result in every child account. Hover a child badge to see its order ID or error.
-- **Child Accounts:** add (then straight into that client's Kite login), edit the
-  multiplier, pause/resume, log in again, delete.
+- **Orders:** place an order in the master account (market, limit, SL, SL-M; CNC,
+  MIS or NRML; optionally AMO) after a confirmation step, and follow today's master
+  order book from Kite. Completed orders are copied like any other master trade.
+  The master order is always real: `DRY_RUN` only affects the child copies.
+  Market and SL-M orders use Kite's automatic market protection.
+- **Child Accounts:** add (with the child's own Kite app key and secret, then
+  straight into that client's Kite login), edit the multiplier or app credentials,
+  pause/resume, log in again, delete.
 - **Settings:** register the master and its own Kite app key/secret (the secret is
   write-only), the copy-trading kill switch, and **max quantity per trade**. A child
   order above the limit is blocked and logged as `SKIPPED`, not reduced.
@@ -102,9 +117,9 @@ Try `DRY_RUN=true` first to see exactly what would be placed without sending ord
 
 ## Known limitations and things to check before going live
 
-- **Kite app access:** a Kite Connect app only accepts logins from client IDs
-  authorised for it. If a child can't log in with the shared app, give that account
-  its own app with `manage.py add ID --role child --api-key K --api-secret S`.
+- **Kite app access:** a Kite Connect app only accepts logins from the client ID it
+  is registered to ("The user is not enabled for the app"), so each child must have
+  its own app. Changing a child's API key clears its login.
 - **Regulation:** SEBI's retail algo framework and Zerodha's API rules (static-IP
   whitelisting for order APIs, order-rate limits, and restrictions on trading
   accounts that aren't yours or your family's) apply. Confirm compliance before

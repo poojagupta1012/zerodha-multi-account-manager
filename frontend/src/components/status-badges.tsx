@@ -23,6 +23,16 @@ export function TokenBadge({ fresh }: { fresh: boolean }) {
   )
 }
 
+// A child without its own Kite app cannot log in (Kite rejects other client IDs).
+export function NoAppBadge() {
+  return (
+    <Badge variant="outline" className={tone.warning}>
+      <Dot />
+      No API key
+    </Badge>
+  )
+}
+
 const copyTone: Record<CopyStatus, string> = {
   PLACED: tone.success,
   FAILED: tone.danger,
@@ -40,6 +50,26 @@ export function CopyStatusBadge({
   return (
     <Badge variant="outline" className={cn(copyTone[status], className)} {...props}>
       {children ?? status.toLowerCase()}
+    </Badge>
+  )
+}
+
+// Kite order book statuses. Anything not listed (OPEN, TRIGGER PENDING,
+// AMO REQ RECEIVED, ...) is still working, so it reads as pending.
+const orderTone: Record<string, string> = {
+  COMPLETE: tone.success,
+  REJECTED: tone.danger,
+  CANCELLED: tone.muted,
+}
+
+export function OrderStatusBadge({
+  status,
+  className,
+  ...props
+}: { status: string } & Omit<React.ComponentProps<typeof Badge>, "variant">) {
+  return (
+    <Badge variant="outline" className={cn(orderTone[status] ?? tone.warning, className)} {...props}>
+      {status.toLowerCase()}
     </Badge>
   )
 }

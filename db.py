@@ -95,6 +95,10 @@ class Account:
     api_key: str                 # per-account key or the global default
     api_secret: str              # decrypted per-account secret or global default
     token_updated_at: Optional[datetime]
+    # True when the account stores its own Kite app key and secret. Kite only
+    # lets the client ID an app is registered to log in through it, so each
+    # child needs its own app; only the master may use the .env defaults.
+    has_own_app: bool = False
 
     @property
     def has_fresh_token(self) -> bool:
@@ -162,6 +166,7 @@ def _row_to_account(row: sqlite3.Row) -> Account:
         api_key=row["api_key"] or config.KITE_API_KEY,
         api_secret=_decrypt(row["api_secret"]) or config.KITE_API_SECRET,
         token_updated_at=datetime.fromisoformat(updated) if updated else None,
+        has_own_app=bool(row["api_key"] and row["api_secret"]),
     )
 
 
@@ -257,6 +262,36 @@ def set_multiplier(client_id: str, multiplier: float) -> None:
         conn.execute(
             "UPDATE accounts SET multiplier = ? WHERE client_id = ?",
             (multiplier, client_id.strip().upper()),
+        )
+
+
+def set_account_credentials(client_id: str, api_key: str, api_secret: Optional[str]) -> None:
+    """
+    Store an account's own Kite app key and secret. A blank secret keeps the
+    stored one, but only for the same key. Changing the key clears the access
+    token, since a token is only valid with the app that issued it.
+    """
+    client_id = client_id.strip().upper()
+    api_key = api_key.strip()
+    api_secret = (api_secret or "").strip() or None
+    if not api_key:
+        raise ValueError("api_key is required")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT api_key, api_secret FROM accounts WHERE client_id = ?", (client_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown client_id {client_id}")
+        key_changed = row["api_key"] != api_key
+        if api_secret is None and (key_changed or not row["api_secret"]):
+            raise ValueError("Enter the API secret for this API key")
+        conn.execute(
+            f"""
+            UPDATE accounts SET api_key = ?, api_secret = COALESCE(?, api_secret)
+            {", access_token = NULL, token_updated_at = NULL" if key_changed else ""}
+            WHERE client_id = ?
+            """,
+            (api_key, _encrypt(api_secret), client_id),
         )
 
 

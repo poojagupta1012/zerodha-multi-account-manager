@@ -1,6 +1,6 @@
 "use client"
 
-import { CopyIcon, LayoutDashboardIcon, SettingsIcon, UsersIcon } from "lucide-react"
+import { ArrowLeftRightIcon, CopyIcon, LayoutDashboardIcon, SettingsIcon, UsersIcon } from "lucide-react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 
@@ -21,6 +21,7 @@ import { API_URL } from "@/lib/api"
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboardIcon },
+  { href: "/orders", label: "Orders", icon: ArrowLeftRightIcon },
   { href: "/accounts", label: "Child Accounts", icon: UsersIcon },
   { href: "/settings", label: "Settings", icon: SettingsIcon },
 ] as const

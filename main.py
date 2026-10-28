@@ -18,23 +18,25 @@ Set the app's Redirect URL on developers.kite.trade to
 import hmac
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from kiteconnect import KiteConnect
-from kiteconnect.exceptions import KiteException
-from pydantic import BaseModel, Field, field_validator
+from kiteconnect.exceptions import InputException, KiteException, NetworkException, OrderException, TokenException
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import config
 import db
+from copier import MARKET_PROTECTION_AUTO
 
 config.setup_logging()
 log = logging.getLogger("auth")
 
 CLIENT_ID_PATTERN = r"^[A-Za-z]{2,4}[0-9]{3,6}$"  # Zerodha IDs look like AB1234
+API_KEY_PATTERN = r"^[A-Za-z0-9]{6,64}$"           # Kite app keys are alphanumeric
 
 
 @asynccontextmanager
@@ -77,6 +79,9 @@ def _account_json(a: db.Account) -> dict:
         "is_active": a.is_active,
         "token_fresh": a.has_fresh_token,
         "token_updated_at": a.token_updated_at.isoformat() if a.token_updated_at else None,
+        # The account's own Kite app key (never the secret); None = .env default.
+        "has_own_app": a.has_own_app,
+        "api_key": a.api_key if a.has_own_app else None,
     }
 
 
@@ -93,6 +98,14 @@ def login(
     if account is None:
         # Only pre-registered accounts may log in (see `python manage.py add`).
         raise HTTPException(status_code=404, detail=f"Account {client_id} is not registered")
+    if account.role == "child" and not account.has_own_app:
+        # Kite rejects anyone but the app's own client ID ("The user is not
+        # enabled for the app"), so the shared .env app cannot log a child in.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{account.client_id} has no Kite API key yet. Add the key and secret of "
+                   f"{account.client_id}'s own Kite Connect app first (Child Accounts > Edit).",
+        )
 
     kite = KiteConnect(api_key=account.api_key)
 
@@ -164,8 +177,13 @@ def callback(
 # --- JSON API for the admin UI -----------------------------------------------------
 
 class AccountCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     client_id: str = Field(pattern=CLIENT_ID_PATTERN)
     multiplier: float = Field(gt=0, le=100)
+    # Each child logs in through its own Kite Connect app.
+    api_key: str = Field(pattern=API_KEY_PATTERN)
+    api_secret: str = Field(min_length=6, max_length=128)
 
     @field_validator("client_id")
     @classmethod
@@ -174,8 +192,12 @@ class AccountCreate(BaseModel):
 
 
 class AccountUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     multiplier: Optional[float] = Field(default=None, gt=0, le=100)
     is_active: Optional[bool] = None
+    api_key: Optional[str] = Field(default=None, pattern=API_KEY_PATTERN)
+    api_secret: Optional[str] = Field(default=None, max_length=128)  # blank = keep current
 
 
 class MasterSettings(BaseModel):
@@ -226,7 +248,7 @@ def api_list_accounts():
 def api_create_account(body: AccountCreate):
     if db.get_account(body.client_id):
         raise HTTPException(status_code=409, detail=f"{body.client_id} is already registered")
-    db.upsert_account(body.client_id, "child", body.multiplier)
+    db.upsert_account(body.client_id, "child", body.multiplier, body.api_key, body.api_secret)
     log.info("Added child %s (multiplier %g) via API", body.client_id, body.multiplier)
     return _account_json(db.get_account(body.client_id))
 
@@ -234,6 +256,13 @@ def api_create_account(body: AccountCreate):
 @app.patch("/api/accounts/{client_id}", dependencies=[Depends(require_admin)])
 def api_update_account(client_id: str, body: AccountUpdate):
     account = _get_child(client_id)
+    if body.api_key is not None:
+        try:
+            db.set_account_credentials(account.client_id, body.api_key, body.api_secret)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if body.api_key != account.api_key:
+            log.info("New Kite app key for %s; it must log in again", account.client_id)
     if body.multiplier is not None:
         db.set_multiplier(account.client_id, body.multiplier)
     if body.is_active is not None:
@@ -288,6 +317,114 @@ def api_save_master(body: MasterSettings):
         )
     db.set_master_credentials(body.api_key, body.api_secret)
     return api_get_settings()
+
+
+class OrderCreate(BaseModel):
+    """An order for the master account, placed from the admin UI. Once it
+    completes, the ticker copies it to the children like any other order."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    exchange: Literal["NSE", "BSE", "NFO", "BFO", "MCX", "CDS", "BCD"]
+    tradingsymbol: str = Field(pattern=r"^[A-Za-z0-9&_.\-]{1,40}$")
+    transaction_type: Literal["BUY", "SELL"]
+    quantity: int = Field(ge=1, le=1_000_000)
+    product: Literal["CNC", "MIS", "NRML"]
+    order_type: Literal["MARKET", "LIMIT", "SL", "SL-M"]
+    variety: Literal["regular", "amo"] = "regular"
+    price: Optional[float] = Field(default=None, gt=0)
+    trigger_price: Optional[float] = Field(default=None, gt=0)
+
+    @field_validator("tradingsymbol")
+    @classmethod
+    def upper(cls, v: str) -> str:
+        return v.upper()
+
+    @model_validator(mode="after")
+    def prices_match_order_type(self) -> "OrderCreate":
+        if self.order_type in ("LIMIT", "SL") and self.price is None:
+            raise ValueError(f"{self.order_type} orders need a price")
+        if self.order_type in ("SL", "SL-M") and self.trigger_price is None:
+            raise ValueError(f"{self.order_type} orders need a trigger price")
+        return self
+
+    def kite_params(self) -> dict:
+        params = {
+            "variety": self.variety,
+            "exchange": self.exchange,
+            "tradingsymbol": self.tradingsymbol,
+            "transaction_type": self.transaction_type,
+            "quantity": self.quantity,
+            "product": self.product,
+            "order_type": self.order_type,
+            "validity": KiteConnect.VALIDITY_DAY,
+        }
+        if self.order_type in ("LIMIT", "SL"):
+            params["price"] = self.price
+        if self.order_type in ("SL", "SL-M"):
+            params["trigger_price"] = self.trigger_price
+        if self.order_type in ("MARKET", "SL-M"):
+            params["market_protection"] = MARKET_PROTECTION_AUTO
+        return params
+
+
+# Fields of Kite's order book the UI shows.
+ORDER_FIELDS = (
+    "order_id", "order_timestamp", "exchange", "tradingsymbol", "transaction_type",
+    "order_type", "product", "variety", "quantity", "filled_quantity", "price",
+    "trigger_price", "average_price", "status", "status_message", "tag",
+)
+
+
+def _master_kite() -> tuple[db.Account, KiteConnect]:
+    master = db.get_master()
+    if master is None:
+        raise HTTPException(status_code=409, detail="No master account registered")
+    if not master.has_fresh_token:
+        raise HTTPException(status_code=409,
+                            detail=f"{master.client_id} is not logged in to Kite today")
+    return master, KiteConnect(api_key=master.api_key, access_token=master.access_token)
+
+
+def _kite_error(exc: KiteException) -> HTTPException:
+    """Pass Kite's own message (e.g. an RMS margin rejection) through to the UI."""
+    if isinstance(exc, TokenException):
+        return HTTPException(status_code=409, detail=f"Kite session expired, log in again: {exc}")
+    if isinstance(exc, (InputException, OrderException)):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, NetworkException):
+        return HTTPException(status_code=504, detail=f"Kite did not respond: {exc}")
+    return HTTPException(status_code=502, detail=f"Kite error: {exc}")
+
+
+@app.get("/api/orders", dependencies=[Depends(require_admin)])
+def api_master_orders():
+    """Today's order book of the master account, newest first."""
+    _, kite = _master_kite()
+    try:
+        orders = kite.orders()
+    except KiteException as exc:
+        raise _kite_error(exc)
+    rows = [{k: o.get(k) for k in ORDER_FIELDS} for o in orders]
+    for r in rows:
+        if r["order_timestamp"] is not None:
+            r["order_timestamp"] = str(r["order_timestamp"])
+    rows.sort(key=lambda r: r["order_timestamp"] or "", reverse=True)
+    return rows
+
+
+@app.post("/api/orders", status_code=201, dependencies=[Depends(require_admin)])
+def api_place_order(body: OrderCreate):
+    """Place a real order in the master account. DRY_RUN only affects the
+    child copies; the master order always goes to Kite."""
+    master, kite = _master_kite()
+    params = body.kite_params()
+    try:
+        order_id = kite.place_order(**params)
+    except KiteException as exc:
+        log.warning("Master order rejected for %s: %s | %s", master.client_id, exc, params)
+        raise _kite_error(exc)
+    log.info("Placed master order %s for %s via UI: %s", order_id, master.client_id, params)
+    return {"order_id": str(order_id)}
 
 
 @app.put("/api/settings/safety", dependencies=[Depends(require_admin)])

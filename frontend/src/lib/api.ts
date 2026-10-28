@@ -3,11 +3,14 @@ import type {
   AddAccountValues,
   CopyRow,
   Dashboard,
+  MasterOrder,
   MasterSettingsValues,
+  PlaceOrderValues,
   SafetySettings,
   SafetySettingsValues,
   Settings,
 } from "@/lib/schemas"
+import { needsPrice, needsTrigger } from "@/lib/schemas"
 
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "")
 
@@ -32,6 +35,16 @@ export function setAdminToken(token: string): void {
     // Not persisted; requests will go out without a token.
   }
 }
+
+export type AccountUpdate = {
+  multiplier?: number
+  is_active?: boolean
+  api_key?: string
+  api_secret?: string // blank keeps the stored secret
+}
+
+// Must match the Redirect URL on every Kite Connect app (master and children).
+export const KITE_REDIRECT_URL = `${API_URL}/api/callback`
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -74,11 +87,19 @@ export const api = {
   dashboard: () => request<Dashboard>("/api/dashboard"),
   accounts: () => request<Account[]>("/api/accounts"),
   createAccount: (body: AddAccountValues) => request<Account>("/api/accounts", json("POST", body)),
-  updateAccount: (clientId: string, body: { multiplier?: number; is_active?: boolean }) =>
+  updateAccount: (clientId: string, body: AccountUpdate) =>
     request<Account>(`/api/accounts/${encodeURIComponent(clientId)}`, json("PATCH", body)),
   deleteAccount: (clientId: string) =>
     request<void>(`/api/accounts/${encodeURIComponent(clientId)}`, { method: "DELETE" }),
   copies: (limit = 200) => request<CopyRow[]>(`/api/copies?limit=${limit}`),
+  masterOrders: () => request<MasterOrder[]>("/api/orders"),
+  placeOrder: ({ price, trigger_price, ...body }: PlaceOrderValues) =>
+    request<{ order_id: string }>("/api/orders", json("POST", {
+      ...body,
+      // Only send the prices this order type uses.
+      price: needsPrice(body.order_type) ? price : null,
+      trigger_price: needsTrigger(body.order_type) ? trigger_price : null,
+    })),
   settings: () => request<Settings>("/api/settings"),
   saveMaster: (body: MasterSettingsValues) =>
     request<Settings>("/api/settings/master", json("PUT", {

@@ -14,9 +14,9 @@ def master():
     db.upsert_account("AB1234", "master")
 
 
-def fake_session(user_id):
+def fake_session(user_id, secret="test_secret"):
     def generate_session(self, request_token, api_secret):
-        assert request_token == "rt" and api_secret == "test_secret"
+        assert request_token == "rt" and api_secret == secret
         return {"user_id": user_id, "access_token": "fresh-token"}
     return generate_session
 
@@ -79,12 +79,20 @@ def test_require_admin_accepts_header(monkeypatch):
 
 # --- admin UI API --------------------------------------------------------------------
 
+def new_child(client_id="cd5678", multiplier=0.5, **kw):
+    body = {"api_key": "childkey1", "api_secret": "childsecret1", **kw}
+    return main.api_create_account(main.AccountCreate(client_id=client_id, multiplier=multiplier, **body))
+
+
 def test_create_update_delete_child():
-    created = main.api_create_account(main.AccountCreate(client_id="cd5678", multiplier=0.5))
-    assert created == {**created, "client_id": "CD5678", "role": "child", "token_fresh": False}
+    created = new_child()
+    assert created == {**created, "client_id": "CD5678", "role": "child", "token_fresh": False,
+                       "has_own_app": True, "api_key": "childkey1"}
+    assert "childsecret1" not in str(created)
+    assert db.get_account("CD5678").api_secret == "childsecret1"
 
     with pytest.raises(HTTPException) as e:
-        main.api_create_account(main.AccountCreate(client_id="CD5678", multiplier=1))
+        new_child("CD5678", 1)
     assert e.value.status_code == 409
 
     updated = main.api_update_account("CD5678", main.AccountUpdate(multiplier=2, is_active=False))
@@ -102,10 +110,55 @@ def test_child_routes_refuse_master():
 
 
 def test_account_validation():
+    keys = {"api_key": "childkey1", "api_secret": "childsecret1"}
     with pytest.raises(ValueError):
-        main.AccountCreate(client_id="not an id", multiplier=1)
+        main.AccountCreate(client_id="not an id", multiplier=1, **keys)
     with pytest.raises(ValueError):
-        main.AccountCreate(client_id="CD5678", multiplier=0)
+        main.AccountCreate(client_id="CD5678", multiplier=0, **keys)
+    with pytest.raises(ValueError):  # a child must bring its own Kite app
+        main.AccountCreate(client_id="CD5678", multiplier=1)
+    with pytest.raises(ValueError):
+        main.AccountCreate(client_id="CD5678", multiplier=1, api_key="bad key!", api_secret="childsecret1")
+
+
+def test_child_login_uses_its_own_app(monkeypatch):
+    new_child()
+    qs = parse_qs(urlparse(main.login(client_id="CD5678", admin_token=None).headers["location"]).query)
+    assert qs["api_key"] == ["childkey1"]
+
+    monkeypatch.setattr(main.KiteConnect, "generate_session", fake_session("CD5678", "childsecret1"))
+    resp = main.callback(request_token="rt", status="success", client_id="CD5678")
+    assert resp.headers["location"].endswith("/accounts?logged_in=CD5678")
+    assert db.get_account("CD5678").has_fresh_token
+
+
+def test_child_without_own_app_cannot_log_in():
+    db.upsert_account("CD5678", "child", 1.0)  # e.g. added with manage.py, no keys
+    with pytest.raises(HTTPException) as e:
+        main.login(client_id="CD5678", admin_token=None)
+    assert e.value.status_code == 409 and "API key" in e.value.detail
+
+
+def test_update_child_credentials():
+    new_child()
+    db.save_access_token("CD5678", "t")
+
+    # Same key, blank secret: keeps the secret and the login.
+    main.api_update_account("CD5678", main.AccountUpdate(api_key="childkey1", api_secret=""))
+    acct = db.get_account("CD5678")
+    assert acct.api_secret == "childsecret1" and acct.has_fresh_token
+
+    # A new key needs its secret...
+    with pytest.raises(HTTPException) as e:
+        main.api_update_account("CD5678", main.AccountUpdate(api_key="otherkey2", api_secret=""))
+    assert e.value.status_code == 422
+    assert db.get_account("CD5678").api_key == "childkey1"
+
+    # ...and invalidates the token issued by the old app.
+    updated = main.api_update_account("CD5678", main.AccountUpdate(api_key="otherkey2", api_secret="othersecret2"))
+    assert updated["api_key"] == "otherkey2" and updated["token_fresh"] is False
+    acct = db.get_account("CD5678")
+    assert acct.api_secret == "othersecret2" and acct.access_token is None
 
 
 def test_dashboard_counts():
@@ -145,3 +198,72 @@ def test_safety_settings_roundtrip():
     assert main.api_save_safety(main.SafetySettings(copy_enabled=False, max_quantity_per_trade=500)) == {
         "copy_enabled": False, "max_quantity_per_trade": 500}
     assert main.api_get_settings()["safety"]["max_quantity_per_trade"] == 500
+
+
+# --- master orders from the UI --------------------------------------------------------
+
+def order(**kw):
+    body = {"exchange": "NSE", "tradingsymbol": "infy", "transaction_type": "BUY",
+            "quantity": 5, "product": "CNC", "order_type": "MARKET", **kw}
+    return main.OrderCreate(**body)
+
+
+def test_place_order_requires_master_login():
+    with pytest.raises(HTTPException) as e:
+        main.api_place_order(order())
+    assert e.value.status_code == 409 and "not logged in" in e.value.detail
+
+
+def test_place_order_sends_kite_params(monkeypatch):
+    db.save_access_token("AB1234", "t")
+    sent = {}
+
+    def place_order(self, **params):
+        sent.clear()
+        sent.update(params)
+        return "250101000000001"
+
+    monkeypatch.setattr(main.KiteConnect, "place_order", place_order)
+    assert main.api_place_order(order()) == {"order_id": "250101000000001"}
+    assert sent == {"variety": "regular", "exchange": "NSE", "tradingsymbol": "INFY",
+                    "transaction_type": "BUY", "quantity": 5, "product": "CNC",
+                    "order_type": "MARKET", "validity": "DAY", "market_protection": -1}
+
+    main.api_place_order(order(order_type="SL", price=1500, trigger_price=1495))
+    assert sent["price"] == 1500 and sent["trigger_price"] == 1495
+    assert "market_protection" not in sent
+
+
+def test_place_order_passes_kite_rejection_through(monkeypatch):
+    db.save_access_token("AB1234", "t")
+
+    def place_order(self, **params):
+        raise main.InputException("Insufficient funds. Required margin is 7500.00")
+
+    monkeypatch.setattr(main.KiteConnect, "place_order", place_order)
+    with pytest.raises(HTTPException) as e:
+        main.api_place_order(order())
+    assert e.value.status_code == 400 and "Insufficient funds" in e.value.detail
+
+
+def test_order_validation():
+    with pytest.raises(ValueError):
+        order(order_type="LIMIT")  # no price
+    with pytest.raises(ValueError):
+        order(order_type="SL-M")  # no trigger price
+    with pytest.raises(ValueError):
+        order(quantity=0)
+    with pytest.raises(ValueError):
+        order(tradingsymbol="INFY; DROP")
+
+
+def test_master_orders_newest_first(monkeypatch):
+    db.save_access_token("AB1234", "t")
+    book = [
+        {"order_id": "1", "order_timestamp": "2026-10-28 09:20:00", "status": "COMPLETE", "secret": "x"},
+        {"order_id": "2", "order_timestamp": "2026-10-28 10:05:00", "status": "REJECTED"},
+    ]
+    monkeypatch.setattr(main.KiteConnect, "orders", lambda self: book)
+    rows = main.api_master_orders()
+    assert [r["order_id"] for r in rows] == ["2", "1"]
+    assert "secret" not in rows[0] and rows[0]["status_message"] is None

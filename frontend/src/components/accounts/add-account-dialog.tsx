@@ -20,7 +20,7 @@ import {
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { useCreateAccount } from "@/hooks/use-api"
-import { kiteLoginUrl } from "@/lib/api"
+import { KITE_REDIRECT_URL, kiteLoginUrl } from "@/lib/api"
 import { addAccountSchema, type AddAccountValues } from "@/lib/schemas"
 
 export function AddAccountDialog() {
@@ -28,7 +28,7 @@ export function AddAccountDialog() {
   const create = useCreateAccount()
   const form = useForm<AddAccountValues>({
     resolver: zodResolver(addAccountSchema),
-    defaultValues: { client_id: "", multiplier: 1 },
+    defaultValues: { client_id: "", multiplier: 1, api_key: "", api_secret: "" },
   })
 
   async function onSubmit(values: AddAccountValues) {
@@ -56,8 +56,11 @@ export function AddAccountDialog() {
           <DialogHeader>
             <DialogTitle>Add child account</DialogTitle>
             <DialogDescription>
-              After saving you&apos;ll be sent to Kite to log in as this client, which issues today&apos;s access
-              token. Log in with that client&apos;s own credentials.
+              Kite only lets an app&apos;s own client ID log in, so each child needs its own Kite Connect app. On
+              developers.kite.trade, create an app with this client ID as its Zerodha Client ID and the redirect
+              URL{" "}
+              <code className="font-mono text-foreground break-all">{KITE_REDIRECT_URL}</code>, and paste its key
+              and secret below. After saving you&apos;ll be sent to Kite to log in as this client.
             </DialogDescription>
           </DialogHeader>
 
@@ -101,6 +104,43 @@ export function AddAccountDialog() {
                   <FieldDescription>
                     Child quantity = master quantity × multiplier, rounded down (to whole lots for F&amp;O).
                   </FieldDescription>
+                  <FieldError errors={[fieldState.error]} />
+                </Field>
+              )}
+            />
+            <Controller
+              name="api_key"
+              control={form.control}
+              render={({ field, fieldState }) => (
+                <Field data-invalid={fieldState.invalid}>
+                  <FieldLabel htmlFor="add-api-key">API key</FieldLabel>
+                  <Input
+                    {...field}
+                    id="add-api-key"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="font-mono"
+                    aria-invalid={fieldState.invalid}
+                  />
+                  <FieldError errors={[fieldState.error]} />
+                </Field>
+              )}
+            />
+            <Controller
+              name="api_secret"
+              control={form.control}
+              render={({ field, fieldState }) => (
+                <Field data-invalid={fieldState.invalid}>
+                  <FieldLabel htmlFor="add-api-secret">API secret</FieldLabel>
+                  <Input
+                    {...field}
+                    id="add-api-secret"
+                    type="password"
+                    autoComplete="new-password"
+                    className="font-mono"
+                    aria-invalid={fieldState.invalid}
+                  />
+                  <FieldDescription>Stored encrypted on the server and never shown again.</FieldDescription>
                   <FieldError errors={[fieldState.error]} />
                 </Field>
               )}

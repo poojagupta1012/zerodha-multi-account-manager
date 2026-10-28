@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
-import { api } from "@/lib/api"
+import { api, type AccountUpdate } from "@/lib/api"
 import type { MasterSettingsValues, SafetySettingsValues } from "@/lib/schemas"
 
 // Copies and the ticker heartbeat change while the market is open, so the
@@ -14,6 +14,7 @@ export const queryKeys = {
   dashboard: ["dashboard"] as const,
   accounts: ["accounts"] as const,
   copies: ["copies"] as const,
+  masterOrders: ["master-orders"] as const,
   settings: ["settings"] as const,
 }
 
@@ -23,6 +24,22 @@ export function useDashboard() {
 
 export function useCopies() {
   return useQuery({ queryKey: queryKeys.copies, queryFn: () => api.copies(), refetchInterval: LIVE_REFRESH_MS })
+}
+
+// Today's master order book, straight from Kite. Only fetched while the master
+// is logged in, since the call needs its access token.
+export function useMasterOrders(enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.masterOrders,
+    queryFn: api.masterOrders,
+    refetchInterval: LIVE_REFRESH_MS,
+    enabled,
+  })
+}
+
+export function usePlaceOrder() {
+  const invalidate = useInvalidate()
+  return useMutation({ mutationFn: api.placeOrder, onSuccess: invalidate, onError })
 }
 
 export function useAccounts() {
@@ -48,7 +65,7 @@ export function useCreateAccount() {
 export function useUpdateAccount() {
   const invalidate = useInvalidate()
   return useMutation({
-    mutationFn: ({ clientId, ...body }: { clientId: string; multiplier?: number; is_active?: boolean }) =>
+    mutationFn: ({ clientId, ...body }: { clientId: string } & AccountUpdate) =>
       api.updateAccount(clientId, body),
     onSuccess: invalidate,
     onError,

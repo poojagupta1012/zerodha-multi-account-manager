@@ -11,6 +11,7 @@ import { useDashboard } from "@/hooks/use-api"
 
 const TITLES: Record<string, string> = {
   "/": "Dashboard",
+  "/orders": "Orders",
   "/accounts": "Child Accounts",
   "/settings": "Settings",
 }

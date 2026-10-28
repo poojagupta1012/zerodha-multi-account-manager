@@ -18,7 +18,7 @@ import { ArrowDownIcon, ArrowUpDownIcon, ArrowUpIcon, SearchIcon, UsersIcon } fr
 import { useState } from "react"
 
 import { AccountRowActions } from "@/components/accounts/account-row-actions"
-import { TokenBadge } from "@/components/status-badges"
+import { NoAppBadge, TokenBadge } from "@/components/status-badges"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -53,7 +53,11 @@ const columns = helper.columns([
     sortFn: "basic",
     cell: ({ row }) => (
       <div className="flex flex-wrap gap-1">
-        <TokenBadge fresh={row.original.token_fresh} />
+        {row.original.role === "child" && !row.original.has_own_app ? (
+          <NoAppBadge />
+        ) : (
+          <TokenBadge fresh={row.original.token_fresh} />
+        )}
         {!row.original.is_active && (
           <Badge variant="outline" className="text-muted-foreground">
             Paused

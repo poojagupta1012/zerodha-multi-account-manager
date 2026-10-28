@@ -28,7 +28,8 @@ def main() -> int:
     add.add_argument("client_id")
     add.add_argument("--role", choices=["master", "child"], required=True)
     add.add_argument("--multiplier", type=float, default=1.0)
-    add.add_argument("--api-key", help="per-account Kite app key (defaults to KITE_API_KEY)")
+    add.add_argument("--api-key", help="per-account Kite app key (defaults to KITE_API_KEY; "
+                     "children need their own, since Kite only lets an app's own client ID log in)")
     add.add_argument("--api-secret", help="per-account Kite app secret")
 
     sub.add_parser("list", help="show accounts and token status")
@@ -65,6 +66,9 @@ def main() -> int:
         db.upsert_account(args.client_id, args.role, args.multiplier,
                           args.api_key, args.api_secret)
         print(f"Saved {args.client_id.upper()} as {args.role} (multiplier {args.multiplier})")
+        if args.role == "child" and not db.get_account(args.client_id).has_own_app:
+            print("Note: this child has no Kite app of its own yet; add --api-key and "
+                  "--api-secret before it can log in.")
     elif args.cmd == "list":
         print(f"{'CLIENT':<10} {'ROLE':<7} {'MULT':>6} {'ACTIVE':<7} {'TOKEN':<8} LAST LOGIN")
         for a in db.list_accounts():
